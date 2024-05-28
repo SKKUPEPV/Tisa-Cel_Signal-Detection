@@ -1,0 +1,1048 @@
+
+*Conventional signal detection;
+data duplicate;
+	set sub.suspectedduplicates;
+	duplicate = Suspected_duplicate_ReportId*1;
+run;
+
+proc sql;
+	create table drug1 as
+	select *
+	from main.drug
+	where umcreportid not in (select distinct duplicate from duplicate);
+quit;
+
+proc sql;
+	create table drug2 as
+	select *
+	from drug1
+	where basis ^= "2";
+quit;
+
+proc sql;
+	create table drug_ae as
+	select a.*, b.*
+	from drug2 as a inner join main.adr as b on a.umcreportid = b.umcreportid
+	where b.MedDRA_Id ^= 0;
+quit;
+
+proc sql;
+	create table drug_ae1 as
+	select distinct *, max(drug_id) as a
+	from drug_ae
+	group by umcreportid, medicinalprod_id;
+quit;
+
+proc sql;
+	create table drug_ae2 as
+	select distinct *, max(adr_id) as b
+	from drug_ae1
+	group by umcreportid, meddra_id;
+quit;
+
+data b.drug_ae2;
+	set drug_ae2;
+	if b = adr_id AND a = drug_id;
+run;
+
+proc sql;
+	create table b.drug_ae as
+	select distinct a.umcreportid, a.medicinalprod_id, a.drecno, a.adr_id, a.drug_id, b.pt_code
+	from b.drug_ae2 as a left join b.meddra_v24 as b on a.meddra_id = b.llt_code;
+quit;
+
+proc sql; select count(distinct umcreportid) from t.drug_ae; quit;
+
+data b.demo;
+	set main.demo;
+
+	if gender = "-" then sex = 0; 
+	else sex = gender*1;
+
+	agg = agegroup*1;
+
+	
+	if type = "-" then report_type = 4;
+	else report_type = type*1;
+
+	reporting = substr(FirstDateDatabase,1,4)*1;
+
+	region_num = region*1;
+
+	drop agegroup -- firstdatedatabase;
+run;
+
+data b.srce;
+	set main.srce;
+	notifier = type*1;
+run;
+
+data b.out;
+	set main.out;
+	if serious in ("-","Y") then serious_num = 1;
+	else serious_num = 0;
+	if seriousness = "-" then serious_outcome = 0;
+	else serious_outcome = seriousness*1;
+	drop seriousness serious;
+run;
+
+data b.link;
+	set main.link;
+	if TimeToOnsetMin in (" ", "-") then tto_min = .;
+	else tto_min = TimeToOnsetMin;
+	if TimeToOnsetMax in (" ", "-") then tto_max = .;
+	else tto_max = TimeToOnsetMax;
+	
+	if tto_min =. and tto_max =. then tto = .;
+	else if tto_min =. then tto = .;
+	else if tto_max =. then tto = .;
+	else if (tto_max + tto_min)/2 = int((tto_max + tto_min)/2) then tto = (tto_max + tto_min)/2;
+	else tto = int((tto_max + tto_min)/2) +1;
+
+	if rechallenge1 = "1" and rechallenge2 ="1" then rechall_pos = 1;
+	else 	rechall_pos = 0;
+
+	if dechallenge1 in ("1", "2") and dechallenge2 = "1" then dechall_pos = 1;
+	else dechall_pos = 0;
+	
+	if tto >= 0 then tto_pos = 1;
+	else tto_pos = 0;
+
+	drop tto_min tto_max TimeToOnsetMin TimeToOnsetMax rechallenge1 rechallenge2 
+			dechallenge1 dechallenge2;
+run;
+
+proc import out = b.pregnancy
+	datafile = 'C:\Users\user\Desktop\Vigibase_june_updated\tisa2\sub_table.xlsx'
+	DBMS = xlsx replace;
+	sheet = "Pregnancy";
+run;
+
+proc import out = b.different_use
+	datafile = 'C:\Users\user\Desktop\Vigibase_june_updated\tisa2\sub_table.xlsx'
+	DBMS = xlsx replace;
+	sheet = "Different_pattern";
+run;
+
+proc import out = main.meddra_v24_1
+	datafile = 'C:\Users\user\Desktop\Vigibase_june_updated\MedDRA dictionary ver24.1_primary.xlsx'
+	DBMS = xlsx replace;
+run;
+
+proc sql;
+	create table b.dictionary as
+	select distinct llt_code, pt_code, soc_code
+	from b.meddra;   
+quit;
+
+proc sql;
+	create table soc as
+	select distinct soc_code
+	from b.dictionary;
+quit;
+
+data soc;
+	set soc;
+	n+1;
+run;
+
+proc sql;
+	create table b.dic as
+	select distinct a.*, b.n
+	from b.dictionary as a left join soc as b on a.soc_code = b.soc_code;
+quit;
+
+data tisa;
+	set who.mp;
+	study_drug = 1;
+	where Drug_record_number contains "143859";
+run;
+
+proc sql;
+	create table tisa1 as
+	select distinct medicinalprod_id, study_drug
+	from tisa;
+quit;
+
+data tisa2;
+	set tisa1;
+	medipro = medicinalprod_id*1;
+run;
+
+proc sql;
+	create table drug_ae1 as
+	select distinct a.*, b.study_drug
+	from b.drug_ae as a left join tisa2 as b on a.Medicinalprod_Id = b.medipro;
+quit;
+
+data b.drug_ae1;
+	set drug_ae1;
+	if study_drug = 1 then prod_level = 999999;
+	else prod_level = MedicinalProd_Id;
+	drop MedicinalProd_Id study_drug;
+run;
+
+%macro step1(inds,outds,case_level,prod_level,event_level);
+
+	data events(rename=(holder=&event_level.));
+		set &inds.;
+		do i = 1 by 1 while(scan(&event_level.,i,' ')^=' ');
+			holder=scan(&event_level.,i,' ');
+			output;
+		end;
+		keep &case_level. holder;
+	run;
+
+	data prods(rename=(holder=&prod_level.));
+		set &inds.;
+		do i = 1 by 1 while(scan(&prod_level.,i,' ')^=' ');
+			holder=scan(&prod_level.,i,' ');
+			output;
+		end;
+		keep &case_level. holder;
+	run;
+	proc sql noprint undo_policy=NONE;
+		create table events as
+			select distinct &case_level., &event_level.
+			from events
+		;
+		create table prods as
+			select distinct &case_level., &prod_level.
+			from prods
+		;
+		create table prod_event as
+			select a.&case_level., a.&prod_level., b.&event_level.
+			from
+				prods a
+				left outer join
+				events b
+			on a.&case_level.=b.&case_level.
+			order by a.&case_level., a.&prod_level.
+		;
+	quit;
+
+	proc sql noprint;
+		create table n11 as
+			select &prod_level., &event_level., count(*) as N11
+			from prod_event
+			group by &prod_level., &event_level.
+		;
+		create table n1x as
+			select &prod_level., count(*) as N1x
+			from prods
+			group by &prod_level.
+		;
+		create table nx1 as
+			select &event_level., count(*) as Nx1
+			from events
+			group by &event_level.
+		;
+		select count(*) into :TOTAL 
+			from (select distinct &case_level. from prods)
+		;
+		create table &outds as
+			select a.&prod_level., a.&event_level., N11, (N1x-N11) as N12, (Nx1-N11) as N21, 
+					&TOTAL.-(N1x-N11)-N11-(Nx1-N11) as N22
+			from work.n11 a, work.n1x b, work.nx1 c
+			where
+				a.&prod_level.=b.&prod_level.
+				and
+				a.&event_level.=c.&event_level.
+		;
+		drop table N11;
+		drop table N1x;
+		drop table Nx1;
+		drop table events, prods, prod_event;
+	quit;
+%mend step1;
+
+%step1(b.drug_ae1,step1,umcreportid,prod_level,pt_code);
+
+
+%macro step2(inds,outds,case_level,prod_level,event_level,Z_alpha);
+
+   proc sort data = step1; by &prod_level. &event_level.; run;
+   data step2;
+      set step1; 
+      by &prod_level &event_level; 
+      
+      Prod_Total = sum(of N11, N12);
+      Event_Total = sum(of N11, N21);
+      Total = sum(of N11, N12, N21, N22);      
+         
+         if (N11>0 and N21>0) or (N11>0 and N12>0) then RR = (N11*(Total))/((Prod_Total)+(Event_Total));
+         else RR=.;
+         if (N12>0 and N21>0) then do;
+         ROR=(N11*N22)/(N12*N21);
+         LNROR_SE=sqrt((1/N11) + (1/N12) + (1/N21) + (1/N22));
+         ROR_LCL =exp(log(ROR) - &Z_alpha. * LNROR_SE);
+         ROR_UCL =exp(log(ROR) + &Z_alpha. * LNROR_SE);
+      end;
+      else do;
+      ROR=.; LNROR_SE=.; ror_lcl=.; prr_ucl=.;
+      end;
+       if TOTAL>0 then IC=log2((N11+0.5)/(Prod_Total*Event_Total/TOTAL+0.5));
+         else IC=.;
+         IC_LCL = IC - 3.3 *((N11+0.5)**(-0.5)) - 2*((N11+0.5)**(-1.5));
+         IC_UCL = IC + 2.4 *((N11+0.5)**(-0.5)) - 0.5*((N11+0.5)**(-1.5));
+      if (N11>0 and N21>0) then do;
+         PRR =( N11/(Prod_Total) )/(N21/(N21+N22));
+         LNPRR_SE=sqrt((1/N11) - (1/(Prod_Total)) + (1/N21) - (1/(N21+N22)));
+         PRR_LCL =exp(log(PRR) - &Z_alpha. * LNPRR_SE);
+         PRR_UCL =exp(log(PRR) + &Z_alpha. * LNPRR_SE);
+      end;      
+      else do;
+         PRR=.; LNPRR_SE=.; prr_lcl=.; prr_ucl=.;
+      end;
+
+      FORMAT  RR ROR ROR_LCL ROR_UCL IC IC_LCL IC_UCL PRR PRR_LCL PRR_UCL 12.3;
+      LABEL;
+     KEEP &prod_level. &event_level. N11 N12 N21 N22 Prod_Total Event_Total Total ROR_LCL IC_LCL PRR_LCL;
+   RUN;
+   
+%mend step2;
+%step2(step1,step2,umcreportid,prod_level,pt_code,1.96);
+
+data step2;
+	set step2;
+	n+1;
+run;
+
+%macro step3(ds,outds);
+
+	    data &outds.;
+            set &ds.;
+            E11 = Prod_Total*Event_Total/Total;
+            EBGM_Unadj = N11/E11;
+	    RUN;
+	    
+	ods output PostSumInt = work.MCMC_PARMS;
+	proc mcmc data=&outds. seed=32259 nmc=10000 thin=5 nthread=6 propcov=quanew monitor=(Mix_p alpha1 alpha2 beta1 beta2);
+		parms Mix_p 0.3333 alpha1 .2 alpha2 2 beta1 .1 beta2 4;
+	
+		prior alpha1 beta1 ~ gamma(1, iscale=1);
+		prior alpha2 beta2 ~ gamma(1, iscale=1);
+		prior Mix_p ~ uniform(0,1);
+	
+		const1=lgamma(alpha1+N11) - lgamma(alpha1) - lgamma(N11+1);
+		const2=lgamma(alpha2+N11) - lgamma(alpha2) - lgamma(N11+1);
+		LogL1=const1 - N11*log(1+beta1/E11) - alpha1*log(1+E11/beta1);
+		LogL2=const2 - N11*log(1+beta2/E11) - alpha2*log(1+E11/beta2);
+		llike = log(Mix_p*exp(LogL1) + (1-Mix_p)*exp(LogL2));
+		model N11 ~ general(llike); 
+	run;
+	
+	data _null_;
+		set work.MCMC_PARMS;
+		call symput(parameter,mean);
+		call symput(trim(parameter)||'_std',StdDev);
+	run;
+	proc sql; drop table work.MCMC_PARMS; quit;
+	
+	data &outds.;
+		set &outds.;
+	        p1 =E11/(E11 + &beta1.); q1=1-p1;
+	        p2 =E11/(E11 + &beta2.); q2=1-p2;
+			drop p1 p2 q1 q2;
+	
+	        f1=(p1**N11)*(q1**&alpha1.)*exp(lgamma(&alpha1.+N11)-lgamma(&alpha1.)-lgamma(N11+1));
+	        f2=(p2**N11)*(q2**&alpha2.)*exp(lgamma(&alpha2.+N11)-lgamma(&alpha2.)-lgamma(N11+1));
+	        f =&Mix_P*f1+(1-&Mix_P)*f2;
+	        drop f1 f2 f;
+	
+	        mc=1.e-150; 
+	        c=(f > mc); 
+	        c1=1-c;
+	        f =f * c + c1 * mc;
+	        drop mc c c1;
+	
+	        Qn=&Mix_P.*f1/f;
+	        E_Lambda=Qn*((&alpha1.+N11)/(&beta1.+E11))+(1-Qn)*((&alpha2.+N11)/(&beta2.+E11));
+	        E_LogLambda=Qn*(digamma(&alpha1.+N11)-log(&beta1.+E11))+(1-Qn)*(digamma(&alpha2.+N11)-log(&beta2.+E11));
+	        EBlog2=round(E_LogLambda/log(2),.000001);
+	        EBGM=(2**EBlog2);
+	        EBGM=round(EBGM,.000001);
+	        format EBGM  EBlog2 12.6;
+			drop Qn E_Lambda E_LogLambda EBlog2;
+	
+	        alpha1_=N11 + &alpha1.;
+	        beta1_ =E11 + &beta1.;
+	        alpha2_=N11 + &alpha2.;
+	        beta2_ =E11 + &beta2.;
+	        drop alpha1_ beta1_ alpha2_ beta2_;
+
+	        EBGM05 = Qn*QUANTILE('GAMMA', 0.05, alpha1_, 1/beta1_) +
+	                 (1-Qn)*QUANTILE('GAMMA', 0.05, alpha2_, 1/beta2_);
+	        EBGM95 = Qn*QUANTILE('GAMMA', 0.95, alpha1_, 1/beta1_) +
+	                 (1-Qn)*QUANTILE('GAMMA', 0.95, alpha2_, 1/beta2_);
+           	
+	run;	
+%mend step3;
+
+%step3(step2,a.dpa);
+
+data dpa;
+	set a.dpa;
+	if prod_level = '999999';
+	pt = pt_code*1;
+run;
+
+*ML-based signal detection;
+data step1_1;
+set sub.suspectedduplicates;
+duplicate = Suspected_duplicate_ReportId*1;
+run;
+
+proc sql;
+create table step1_2 as
+select *
+from main.drug
+where umcreportid not in (select distinct duplicate from step1_1);
+quit; 
+
+proc sql;
+create table r1.drug as
+select distinct umcreportid, drecno, basis, drug_id
+from step1_2
+where basis^="2";
+quit;
+
+proc sql;
+create table step2_1 as
+select distinct a.umcreportid, a.outcome, a.adr_id, a.meddra_id, b.pt, b.pt_code, b.soc
+from main.adr as a left join b.meddra_v24 as b
+on a.meddra_id=b.llt_code;
+quit; 
+
+data r1.adr;
+set step2_1;
+if missing(pt_code) then delete;
+if pt_code=0 then delete;
+run; 
+
+data step3_1;
+set r1.drug;
+if drecno="143859";
+run;
+
+proc sql;
+create table r1.step3 as
+select distinct *
+from step3_1 as a inner join r1.adr as b
+on a.umcreportid=b.umcreportid
+order by a.umcreportid, drecno, pt_code;
+quit;
+
+data r1.s0_demo;
+set main.demo;
+if gender = "-" then sex = 0; 
+else sex = gender*1;
+agg = agegroup*1;
+if type = "-" then report_type = 4;
+else report_type = type*1;
+reporting = substr(FirstDateDatabase,1,4)*1;
+region_num = region*1;
+drop agegroup -- firstdatedatabase;
+run;
+
+data r1.s0_srce;
+set main.srce;
+notifier = type*1;
+run;
+
+data r1.s0_out;
+set main.out;
+if serious in ("-","Y") then serious_num = 1;
+else serious_num = 0;
+if seriousness = "-" then serious_outcome = 0;
+else serious_outcome = seriousness*1;
+drop seriousness serious;
+run;
+
+data r1.s0_link;
+set main.link;
+if TimeToOnsetMin in (" ", "-") then tto_min = .;
+else tto_min = TimeToOnsetMin;
+if TimeToOnsetMax in (" ", "-") then tto_max = .;
+else tto_max = TimeToOnsetMax;
+if tto_min =. and tto_max =. then tto = .;
+else if tto_min =. then tto = .;
+else if tto_max =. then tto = .;
+else if (tto_max + tto_min)/2 = int((tto_max + tto_min)/2) then tto = (tto_max + tto_min)/2;
+else tto = int((tto_max + tto_min)/2) +1;
+if rechallenge1 = "1" and rechallenge2 ="1" then rechall_pos = 1;
+else rechall_pos = 0;
+if dechallenge1 in ("1", "2") and dechallenge2 = "1" then dechall_pos = 1;
+else dechall_pos = 0;
+if tto >= 0 then tto_pos = 1;
+else tto_pos = 0;
+drop tto_min tto_max TimeToOnsetMin TimeToOnsetMax rechallenge1 rechallenge2 dechallenge1 dechallenge2;
+run;
+
+proc sql;
+create table step4_1 as
+select distinct *
+from r1.step3 as a left join r1.s0_link as b
+on a.adr_id=b.adr_id and a.drug_id=b.drug_id;
+quit;
+
+proc sql;
+create table step4_2 as
+select distinct *
+from step4_1 as a left join r1.s0_demo as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sql;
+create table step4_3 as
+select distinct a.*, b.notifier
+from step4_2 as a left join r1.s0_srce as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sql;
+create table step4_4 as
+select distinct *
+from step4_3 as a left join r1.s0_out as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sql;
+create table step4_5 as
+select distinct pt_code, count(distinct umcreportid) as n_report
+from step4_4
+group by 1;
+quit; *1,605;
+
+data step4_6;
+set step4_5;
+if n_report>=3;
+run; *606;
+
+proc sql;
+create table step4_7 as
+select distinct *
+from step4_4 as a inner join step4_5 as b
+on a.pt_code=b.pt_code;
+quit;
+
+data step4_8;
+set step4_7;
+if notifier^=5 or notifier^=.;
+run;
+
+proc sql;
+create table notifier as
+select distinct pt_code, count(umcreportid) as healthcare_pro
+from step4_8
+group by 1;
+quit;
+
+data step4_9;
+set step4_7;
+if report_type in (2,5);
+run;
+
+proc sql;
+create table report_type_study as
+select distinct pt_code, count(umcreportid) as study_report
+from step4_9
+group by 1;
+quit;
+
+proc sql;
+create table temp_pos as
+select distinct pt_code, count(umcreportid) as temp_pos
+from step4_7
+where tto_pos = 1
+group by 1;
+quit;
+
+proc sql;
+create table rechall_pos as
+select distinct pt_code, count(umcreportid) as rechall_pos
+from step4_7
+where rechall_pos = 1
+group by pt_code;
+quit;
+
+proc sql;
+create table dechall_pos as
+select distinct pt_code, count(umcreportid) as dechall_pos
+from step4_7
+where dechall_pos = 1
+group by pt_code;
+quit;
+
+proc sql;
+create table step4_10 as
+select a.*, b.healthcare_pro, c.study_report, d.temp_pos, e.rechall_pos, f.dechall_pos
+from step4_5 as a left join notifier as b on a.pt_code = b.pt_code
+left join report_type_study as c on a.pt_code = c.pt_code
+left join temp_pos as d on a.pt_code = d.pt_code
+left join rechall_pos as e on a.pt_code = e.pt_code
+left join dechall_pos as f on a.pt_code = f.pt_code
+order by a.n_report;
+quit;
+
+data step4_11;
+set step4_7;
+if agg in (1,2,3,4) then agegroup = 1;
+else if agg in (5,6) then agegroup = 2;
+else if agg in (7,8) then agegroup = 3;
+else agegroup = 4;
+run;
+
+%macro agegroup;
+%do int = 1 %to 4;
+
+data age&int.;
+set step4_11;
+if agegroup = &int.;
+run;
+
+proc sql;
+create table agg&int. as
+select distinct pt_code, count(umcreportid) as agg&int.
+from age&int.
+group by 1;
+quit;
+
+%end;
+%mend;
+%agegroup;
+
+proc sql;
+create table step4_12 as
+select a.*, b.agg1, c.agg2, d.agg3
+from step4_10 as a left join agg1 as b on a.pt_code = b.pt_code
+left join agg2 as c on a.pt_code = c.pt_code
+left join agg3 as d on a.pt_code = d.pt_code
+order by a.n_report;
+quit; 
+
+%macro sex;
+%do int = 1 %to 2;
+data sex&int.;
+set step4_7;
+if sex = &int.;
+run;
+
+proc sql;
+create table sex&int. as
+select distinct pt_code, count(umcreportid) as sex&int.
+from sex&int.
+group by pt_code;
+quit;
+%end;
+
+%mend;
+%sex;
+
+proc sql;
+create table step4_13 as
+select a.*, b.sex1, c.sex2
+from step4_12 as a left join sex1 as b on a.pt_code = b.pt_code
+left join sex2 as c on a.pt_code = c.pt_code
+order by a.n_report;
+quit; 
+
+proc sql;
+create table serious as
+select distinct pt_code, count(umcreportid) as serious_ae
+from step4_7
+where serious_num = 1
+group by pt_code;
+quit;
+
+proc sql;
+create table step4_14 as
+select a.*, b.serious_ae
+from step4_13 as a left join serious as b on a.pt_code = b.pt_code
+order by a.n_report;
+quit;
+
+data master6;
+set step4_7;
+if serious_outcome in (1,2) then seriousness = 1;
+else if serious_outcome in (3,6) then seriousness = 2;
+else seriousness = 3;
+run;
+
+%macro seriousness;
+%do int = 1 %to 3;
+data seriousness&int.;
+set master6;
+if seriousness = &int.;
+run;
+
+proc sql;
+create table seriousness&int. as
+select distinct pt_code, count(umcreportid) as seriousness&int.
+from seriousness&int.
+group by pt_code;
+quit;
+
+%end;
+%mend;
+%seriousness;
+
+proc sql;
+create table step4_15 as
+select distinct a.*, b.seriousness1, c.seriousness2, d.seriousness3
+from step4_14 as a left join seriousness1 as b on a.pt_code = b.pt_code 
+left join seriousness2 as c on a.pt_code = c.pt_code 
+left join seriousness3 as d on a.pt_code = d.pt_code 
+order by a.n_report;
+quit; 
+
+data master6;
+set step4_7;
+if outcome in ('1','2') then out = 1;
+else if outcome in ('3','4') then out = 2;
+else if outcome in ('5','7') then out = 3;
+else out = 0;
+run;
+
+%macro outcome;
+%do int = 1 %to 3;
+data outcome&int.;
+set master6;
+if out = &int.;
+run;
+
+proc sql;
+create table outcome&int. as
+select distinct pt_code, count(distinct umcreportid) as outcome&int.
+from outcome&int.
+group by pt_code;
+quit;
+
+%end;
+%mend;
+%outcome;
+
+proc sql;
+create table step4_16 as
+select distinct a.*, b.outcome1, c.outcome2, d.outcome3
+from step4_15 as a left join outcome1 as b on a.pt_code = b.pt_code 
+left join outcome2 as c on a.pt_code = c.pt_code 
+left join outcome3 as d on a.pt_code = d.pt_code 
+order by a.n_report;
+quit; 
+
+%macro region;
+%do int = 1 %to 6;
+data region_num&int.;
+set step4_7;
+if region_num = &int.;
+run;
+
+proc sql;
+create table region_num&int. as
+select distinct pt_code, count(umcreportid) as region_num&int.
+from region_num&int.
+group by pt_code;
+quit;
+
+%end;
+%mend;
+%region;
+
+proc sql;
+create table step4_17 as
+select a.*, b.region_num1, c.region_num2, d.region_num3, e.region_num4, f.region_num5, g.region_num6
+from step4_16 as a left join region_num1 as b on a.pt_code = b.pt_code
+left join region_num2 as c on a.pt_code = c.pt_code
+left join region_num3 as d on a.pt_code = d.pt_code
+left join region_num4 as e on a.pt_code = e.pt_code
+left join region_num5 as f on a.pt_code = f.pt_code
+left join region_num6 as g on a.pt_code = g.pt_code
+order by a.n_report;
+quit; 
+
+proc sql;
+create table master7 as
+select distinct a.*, b.indication
+from step4_7 as a left join main.ind as b 
+on a.drug_id = b.drug_id;
+quit;
+
+data vigigrade;
+set master7;
+
+   if tto = . then vigi_tto = 0.5;
+   else if 30 <= tto < 120 then vigi_tto = 1;
+   else if -30 <= tto < 30 then vigi_tto = 0.9;
+   else vigi_tto = 0.7;
+
+   if Indication = " " then vigi_indi = 0.7;
+   else vigi_indi = 1;
+
+   if Outcome_num = 6 then vigi_outcome = 0.7;
+   else vigi_outcome = 1;
+
+   if sex = 0 then vigi_sex = 0.7;
+   else vigi_sex = 1;
+
+   if agg = 9 then vigi_age = 0.7;
+   else vigi_age = 1;
+
+   if Amount not in ("-", " ") and AmountU not in ("-", " ") and frequency not in ("-", " ") and frequencyU not in ("-", " ") 
+   then vigi_dose = 1;
+   else vigi_dose = 0.9;
+
+   vigi_country = 1;
+
+   if notifier = 0 then vigi_reporter = 0.9;
+   else vigi_reporter = 1;
+
+   if report_type = 4 then vigi_report_tp = 0.9;
+   else vigi_report_tp = 1;
+
+   vigigrade = vigi_tto*vigi_indi*vigi_outcome*vigi_sex*vigi_age*vigi_dose*vigi_country*vigi_reporter*vigi_report_tp;
+   
+run;
+
+data vigigrade1;
+	set vigigrade;
+	if vigigrade >= 0.8 then vigi_qual1 = 1;
+	else vigi_qual1 = 0;
+	if 0.8 > vigigrade >= 0.5 then vigi_qual2 = 1;
+	else vigi_qual2=0;
+run;
+
+proc sql;
+	create table vigigrade as
+	select distinct pt_code, sum(vigi_qual1) as vigi80, sum(vigi_qual2) as vigi50to80
+	from vigigrade1
+	group by pt_code;
+quit; 
+
+proc sql;
+create table step4_18 as 
+select a.*, b.*
+from step4_17 as a left join vigigrade as b 
+on a.pt_code = b.pt_code;
+quit;
+
+proc sql;
+	create table preg_pem as
+	select distinct umcreportid
+	from master7
+	where pt_code in (select distinct pt_code from b.pregnancy);
+quit;
+
+proc sql;
+	create table preg_pem1 as
+	select *
+	from master7
+	where umcreportid in (select distinct umcreportid from preg_pem);
+quit;
+
+proc sql;
+	create table preg_pem as
+	select distinct pt_code, count(umcreportid) as pregnant_report
+	from preg_pem1
+	where pt_code not in (select distinct pt_code from b.pregnancy)
+	group by pt_code;
+quit;
+
+proc sql;
+	create table dif_pem as
+	select distinct umcreportid
+	from master7
+	where pt_code in (select distinct pt_code from b.different_use);
+quit;
+
+proc sql;
+	create table dif_pem1 as
+	select *
+	from master7
+	where umcreportid in (select distinct umcreportid from dif_pem);
+quit;
+
+proc sql;
+	create table dif_pem as
+	select distinct pt_code, count(umcreportid) as different_use
+	from dif_pem1
+	where pt_code not in (select distinct pt_code from b.different_use)
+	group by pt_code;
+quit;
+
+proc sql;
+	create table step4_19 as
+	select distinct a.*, b.pregnant_report
+	from step4_18 as a left join preg_pem as b on a.pt_code = b.pt_code;
+quit;
+
+proc sql;
+	create table step4_20 as
+	select distinct a.*, b.different_use
+	from step4_19 as a left join dif_pem as b on a.pt_code = b.pt_code;
+quit;
+
+proc sql;
+	create table step4_21 as 
+	select distinct a.*, b.n
+	from step4_20 as a left join b.dic as b on a.pt_code = b.pt_code;
+quit;
+
+data step4_22;
+	set step4_21;
+	rename n = system_organ_class;
+run;
+
+proc stdize data = step4_22 out= r1.step4 reponly missing = 0;
+run;
+
+
+proc sql; select count(distinct umcreportid) from main.drug; quit; 
+proc sql; create table temp99_3 as select distinct firstdatedatabase from main.demo;quit; 
+proc sql; select count(distinct umcreportid) from r1.step3; quit; 
+
+proc sql;
+create table temp1 as
+select *
+from r1.step3
+where pt_code in (10006093,10034474,10007617,10058151,10068230,10048610,10007636,10000891,10002915,10003119,10051093);
+quit;
+
+proc sql; select count(distinct umcreportid) from temp1; quit; 
+
+proc sql;
+create table temp2 as
+select distinct *
+from temp1 as a left join r1.s0_demo as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sql;
+create table temp3 as
+select *
+from temp2 as a left join r1.s0_link as b
+on a.adr_id=b.adr_id and a.drug_id=b.drug_id;
+quit;
+
+proc sql;
+create table temp4 as
+select *
+from temp3 as a left join r1.s0_out as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sql;
+create table temp5 as
+select *
+from temp4 as a left join r1.s0_srce as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+proc sort data=temp5 out=temp5_1 nodupkey;
+by umcreportid;
+quit;
+
+proc freq data=temp5_1;
+table sex agg serious_outcome notifier;
+quit;
+
+proc means data=temp5 n median q1 q3;
+where tto>=0;
+var tto;
+quit;
+
+data r1.temp5;
+set temp5;
+run;
+
+proc sql;
+create table temp6 as
+select distinct *
+from r1.temp5 as a left join main.ind as b
+on a.drug_id=b.drug_id;
+quit;
+
+proc sort data=temp6 out=temp6_1 nodupkey;
+by umcreportid;
+quit;
+
+proc freq data=temp6_1;
+table indication;
+quit;
+
+proc sql;
+create table temp7 as
+select *
+from r1.step3
+where umcreportid in (select umcreportid from temp1);
+quit;
+
+data temp8;
+set temp7;
+if pt_code in (10050685, 10052015) then crs=1;
+else crs=0;
+run;
+
+proc sql;
+create table temp8_1 as
+select distinct umcreportid, max(crs) as crs
+from temp8
+group by 1;
+quit;
+
+proc sql;
+create table temp8_2 as
+select distinct *
+from temp1 as a left join temp8_1 as b
+on a.umcreportid=b.umcreportid;
+quit;
+
+data ae1; set temp8_2; if pt_code=10006093; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+data ae1; set temp8_2; if pt_code=10034474; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+data ae1; set temp8_2; if pt_code=10007617; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+data ae1; set temp8_2; if pt_code=10058151; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+data ae1; set temp8_2; if pt_code=10048610; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+data ae1; set temp8_2; if pt_code=10000891; run;
+proc sql; select count(distinct umcreportid) from ae1 where crs=1; quit;
+
+proc sql;
+create table figure2_1 as
+select *
+from r1.step3
+where umcreportid in (select umcreportid from temp1);
+quit;
+
+data figure2_2;
+set figure2_1;
+if soc="Respiratory, thoracic and mediastinal disorders" then soc1=1; else soc1=0;
+if soc="Immune system disorders" then soc2=1; else soc2=0;
+if soc="Renal and urinary disorders" then soc3=1; else soc3=0;
+run;
+
+proc sql;
+create table figure2_3 as
+select distinct umcreportid, max(soc1) as soc1, max(soc2) as soc2, max(soc3) as soc3
+from figure2_2
+group by 1;
+quit;
+
+data figure2_4;
+set figure2_3;
+soc_com=catx("-",soc1,soc2,soc3);
+run;
+
+proc freq data=figure2_4;
+table soc_com;
+quit;
+
+
